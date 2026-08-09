@@ -1,0 +1,6 @@
+{
+  "name": "MIMIC-IV Clinical Evaluation Platform",
+  "description": "Relational MIMIC-IV benchmark platform featuring grounded clinical Q&A, chronological audit streams, data quality auditing, and trajectory risk modeling.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
