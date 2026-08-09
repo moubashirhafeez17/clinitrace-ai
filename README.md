@@ -1,20 +1,114 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://ai.google.dev/static/site-assets/images/share-ais-513315318.png" />
-</div>
+# ClinTrace AI — MIMIC-IV Clinical Evaluation Platform
 
-# Run and deploy your AI Studio app
+A research prototype that answers clinical questions about ICU patients **only** with evidence it can point to in a real database table — and says "I don't know" when it can't. Built on the [MIMIC-IV Clinical Database Demo v2.2](https://physionet.org/content/mimic-iv-demo/2.2/) (3 real, de-identified patients + 97 schema-matched synthetic patients).
 
-This contains everything you need to run your app locally.
+> ⚠️ **Research and educational prototype only. Not for clinical use.** Do not use for diagnosis, treatment, triage, or emergency decisions.
 
-View your app in AI Studio: https://ai.studio/apps/5fe4f0d2-d268-41c8-9643-64ac3fbd63dc
+---
 
-## Run Locally
+## The Problem
 
-**Prerequisites:**  Node.js
+Large language models are good at answering questions in fluent, confident prose — which is exactly what makes them dangerous in a clinical setting. Ask a general-purpose LLM "What was this patient's ejection fraction?" and, if it doesn't actually know, it will often *guess* a plausible-sounding number instead of admitting it has no data. In healthcare, an unsupported but confident answer isn't just "wrong" — it's a hallucination that a clinician could act on.
 
+That creates three distinct problems ClinTrace is designed around:
 
-1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`
+1. **Trust & verifiability** — Clinical answers need to be traceable to a specific row in a specific table (which patient, which admission, which timestamp), not just asserted by a model.
+2. **Data quality** — Real-world EHR data (and MIMIC-IV is a faithful reflection of this) is full of missing values, implausible readings, unit mismatches, duplicates, and temporal inconsistencies. Any downstream model trained or reasoned on top of it inherits those flaws silently.
+3. **Leakage-free prediction** — Clinical risk models are notoriously easy to accidentally cheat: it's easy to let information from *after* the moment of prediction (e.g., final length-of-stay) leak into the features used to predict it, producing benchmark numbers that look great but are meaningless in practice.
+
+## The Solution
+
+ClinTrace is a three-track demo platform that tackles each problem directly:
+
+| Track | Name | What it does |
+|---|---|---|
+| **1** | Timeline & Evidence | A grounded Q&A interface + chronological patient timeline. Every answer either cites the exact source rows (table, field, `subject_id`, timestamp) or explicitly abstains. |
+| **2** | Cohort & Data Quality | An auditor that scans the ingested tables and flags issues — missing values, implausible values, duplicates, unit mismatches, temporal anomalies — each with a suggested validation rule. |
+| **3** | Trajectory & Risk | An explainable ICU length-of-stay (LOS) prediction model. Every feature it uses is computed strictly from data available *before* the prediction's index time, with a full feature-contribution breakdown and citations back to source rows. |
+
+Two supporting views round it out:
+
+- **Evaluation Report** — Computed-at-request-time benchmark metrics: model MAE vs. a naive baseline, error spread, per-cohort (real vs. synthetic) breakdowns, table completeness stats, and worked failure examples showing the system abstaining correctly.
+- **Data Lineage & License** — Full provenance of the dataset (PhysioNet DOI, license, de-identification/date-shifting disclosure) and system architecture notes.
+
+## How It Works
+
+### Data layer
+100 patient records (3 real MIMIC-IV Demo anchors + 97 synthetic, schema-identical records) are loaded in-memory on the server (`src/data/mimicDemoData.ts`), structured as 8 relational tables per patient: `patients`, `admissions`, `transfers`, `icustays`, `labevents`, `prescriptions`, `diagnoses_icd`, `chartevents`. Real anchor subjects are tagged (`REAL_ANCHOR_SUBJECT_IDS`) and visibly labeled in the UI so users always know which patients are real vs. synthetic.
+
+### Backend (`server.ts` — Express)
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/patients` | List all subject IDs |
+| `GET /api/patient/:id` | Full relational record for one subject |
+| `GET /api/quality-issues` | Data quality audit findings (Track 2) |
+| `GET /api/trajectory/:id` | Explainable LOS prediction + feature contributions (Track 3) |
+| `POST /api/qa` | Grounded question answering (Track 1) |
+| `GET /api/evaluation` | Live-computed benchmark & evaluation metrics |
+
+**Grounded Q&A pipeline (`/api/qa`):**
+1. If a `GEMINI_API_KEY` is configured, the patient's full relational record is serialized and sent to Gemini with a strict system instruction: *answer only from the provided rows, and say "Insufficient evidence in structured record" if you can't.*
+2. The response is scanned for abstention language (e.g., "insufficient evidence," "cannot answer," "not available"). If found, the API returns `supported: false` with no fabricated evidence.
+3. If the model *does* answer, the response is paired with evidence citations pulled directly from the patient's labs/admissions/diagnoses rows — not generated by the model.
+4. If no API key is set, or the Gemini call fails, the server falls back to a **deterministic rule engine**: known out-of-scope query types (echo/ejection fraction, pharmacy refills, free-text progress notes — none of which exist in the MIMIC-IV Demo relational tables) are hard-coded to abstain; everything else returns a rule-based grounded summary built directly from the record.
+
+**Leakage-free trajectory model (`/api/trajectory/:id`):** LOS is predicted from four pre-index features only — admission severity/type, age tier, first intake lab abnormality flag, and ICU care-unit specialty — each weighted with a fixed impact score and tied back to its exact source row (table, field, timestamp). The prediction is shown against a cohort baseline with an uncertainty range, so it's clear how much the model actually adds over "always guess the average."
+
+**Evaluation suite (`/api/evaluation`):** Recomputes, on every request (no cached/pre-baked numbers), the model's mean absolute error vs. baseline, error spread (min/max/std-dev), a real-anchor-vs-synthetic MAE split, table-level completeness percentages, and three concrete "failure examples" showing the abstention logic firing correctly.
+
+### Frontend (`src/`, React + Tailwind)
+- `App.tsx` — top-level layout, patient selector, track routing, data fetching.
+- `components/TrackSelector.tsx` — the tab bar for the 3 tracks + 3 secondary views.
+- `components/EvidenceQA.tsx` / `PatientTimeline.tsx` — Track 1 UI.
+- `components/CohortExplorer.tsx` — Track 2 UI.
+- `components/TrajectoryModel.tsx` — Track 3 UI.
+- `components/EvaluationReport.tsx`, `ArchitectureRoadmap.tsx`, `DataLineageLicense.tsx` — secondary views.
+- `components/SafetyNotice.tsx` — the persistent "not for clinical use" banner shown on every screen.
+
+### Design principles baked into the build
+- **No hallucination policy**: an answer is either cited or it's an abstention — never a plausible-sounding guess.
+- **No label leakage**: prediction features are audited to only use information available before the index time being predicted.
+- **Provenance-first UI**: every card that shows a fact links back to `table.field` + timestamp + subject ID.
+- **Real vs. synthetic transparency**: the UI never lets you forget which patients are real MIMIC-IV data vs. generated stand-ins.
+
+---
+
+## How to Use It
+
+### Prerequisites
+- Node.js (v18+ recommended)
+- (Optional) a [Gemini API key](https://aistudio.google.com/) if you want live LLM-grounded Q&A in Track 1. Without it, the app runs fully functional on the deterministic rule engine.
+
+### Setup
+```bash
+npm install
+```
+
+Copy `.env.example` to `.env.local` and set your key if you have one:
+```bash
+GEMINI_API_KEY="your-gemini-api-key"
+```
+
+### Run
+```bash
+npm run dev
+```
+This starts the Express server (with Vite in middleware mode) on `http://localhost:3000`.
+
+### Production build
+```bash
+npm run build
+npm start
+```
+
+### Using the app
+1. **Pick a patient** from the subject selector in the header — real MIMIC-IV anchors are marked `[REAL MIMIC-IV]`, the rest `[SYNTHETIC]`.
+2. **Track 1 — Timeline & Evidence**: type a clinical question (e.g., "What medications was this patient on?"). Try an out-of-scope question like "What was the ejection fraction on the echo?" to see the system abstain instead of guessing.
+3. **Track 2 — Cohort & Data Quality**: browse detected data quality issues across the cohort, each with severity, description, and a suggested validation rule.
+4. **Track 3 — Trajectory & Risk**: view the explainable ICU length-of-stay prediction for the selected patient, with a feature-by-feature breakdown of what drove it and where each feature came from.
+5. **Evaluation Report / Architecture Blueprint / Data Lineage & License**: secondary tabs with benchmark metrics, build documentation, and dataset provenance/licensing info.
+
+---
+
+## Data & License
+Data originates from the **MIMIC-IV Clinical Database Demo v2.2** (PhysioNet, DOI: `10.13026/dp1f-ex47`), used under the PhysioNet License, with dates shifted per HIPAA Safe Harbor de-identification. See the in-app **Data Lineage & License** tab for full details. This project is a hackathon/demo build and is not affiliated with or endorsed by PhysioNet or MIMIC.
