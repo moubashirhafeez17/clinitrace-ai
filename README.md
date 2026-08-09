@@ -75,6 +75,13 @@ Two supporting views round it out:
 
 ## How to Use It
 
+### Quickest way: live demo
+No install needed — the app is already deployed here:
+
+**[https://clinitrace-ai.ai.studio/](https://clinitrace-ai.ai.studio/)**
+
+Open it, pick a patient, and jump straight to the "Using the app" steps below. Use the local setup instead if you want to modify the code, run it offline, or supply your own Gemini API key.
+
 ### Prerequisites
 - Node.js (v18+ recommended)
 - (Optional) a [Gemini API key](https://aistudio.google.com/) if you want live LLM-grounded Q&A in Track 1. Without it, the app runs fully functional on the deterministic rule engine.
